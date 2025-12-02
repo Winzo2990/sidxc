@@ -203,3 +203,106 @@ def download_log():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 6080))
     app.run(host="0.0.0.0", port=port, debug=False)
+async function tailLog(){
+  const resp = await fetch('/log');
+  const txt = await resp.text();
+  const el = document.getElementById('log');
+  el.textContent = txt;
+  el.scrollTop = el.scrollHeight;
+}
+
+refreshStatus();
+setInterval(tailLog, 2000);
+setInterval(refreshStatus, 3000);
+</script>
+</body>
+</html>
+"""
+
+def is_valid_m3u8(url):
+    try:
+        p = urlparse(url)
+        return p.scheme in ("http", "https") and ".m3u8" in url.lower()
+    except:
+        return False
+
+def is_valid_rtmps(url):
+    try:
+        return url.startswith("rtmps://")
+    except:
+        return False
+
+def start_ffmpeg(source_url, rtmps_url):
+    cmd = [
+        "ffmpeg", "-y", "-re",
+        "-i", source_url,
+        "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+        "-b:v", "2500k", "-maxrate", "2500k", "-bufsize", "5000k",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+        "-f", "flv",
+        rtmps_url
+    ]
+
+    with open(FFMPEG_LOG, "ab") as log:
+        log.write(b"\n=== FFmpeg Started ===\n")
+        proc = subprocess.Popen(cmd, stdout=log, stderr=log)
+
+    return proc
+
+@app.route("/")
+def index():
+    return render_template_string(TEMPLATE)
+
+@app.route("/start", methods=["POST"])
+def start():
+    global ffmpeg_proc
+    data = request.get_json()
+
+    source = data["source_url"]
+    rtmps = data["rtmps_url"]
+
+    if not is_valid_m3u8(source):
+        return jsonify({"ok": False, "message": "رابط m3u8 غير صالح"}), 400
+
+    if not is_valid_rtmps(rtmps):
+        return jsonify({"ok": False, "message": "رابط RTMPS غير صالح"}), 400
+
+    with proc_lock:
+        if ffmpeg_proc and ffmpeg_proc.poll() is None:
+            return jsonify({"ok": False, "message": "البث يعمل بالفعل"})
+
+        ffmpeg_proc = start_ffmpeg(source, rtmps)
+        return jsonify({"ok": True, "message": "تم بدء البث 🟢"})
+
+@app.route("/stop", methods=["POST"])
+def stop():
+    global ffmpeg_proc
+
+    with proc_lock:
+        if not ffmpeg_proc or ffmpeg_proc.poll() is not None:
+            return jsonify({"ok": True, "message": "لا يوجد بث شغّال"})
+
+        ffmpeg_proc.terminate()
+        ffmpeg_proc = None
+        return jsonify({"ok": True, "message": "تم إيقاف البث 🔴"})
+
+@app.route("/status")
+def status():
+    global ffmpeg_proc
+
+    running = ffmpeg_proc and ffmpeg_proc.poll() is None
+    return jsonify({"running": running})
+
+@app.route("/log")
+def log():
+    if not os.path.exists(FFMPEG_LOG):
+        return "لا توجد سجلات"
+    return open(FFMPEG_LOG, "r", errors="ignore").read()
+
+@app.route("/download_log")
+def download_log():
+    return send_file(FFMPEG_LOG, as_attachment=True)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 6080))
+    app.run(host="0.0.0.0", port=port, debug=False)
